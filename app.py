@@ -9,7 +9,10 @@ app = Flask(__name__)
 IMAGE_FOLDER = "static/images"
 THUMBNAIL_FOLDER = "static/thumbnails"
 
-images = []
+table.put_item()
+table.scan()
+table.delete_item()
+
 
 os.makedirs(IMAGE_FOLDER, exist_ok=True)
 os.makedirs(THUMBNAIL_FOLDER, exist_ok=True)
