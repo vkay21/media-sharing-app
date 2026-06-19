@@ -1,0 +1,38 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: CloudFormation stack for Snapper media sharing application
+
+Parameters:
+  BucketName:
+    Type: String
+    Default: snap-media-bucket-7944
+
+  TableName:
+    Type: String
+    Default: Data_image
+
+Resources:
+  SnapperMediaBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref BucketName
+
+  SnapperDynamoDBTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Ref TableName
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: image_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: image_id
+          KeyType: HASH
+
+Outputs:
+  BucketNameOutput:
+    Description: Name of the S3 bucket for images and thumbnails
+    Value: !Ref SnapperMediaBucket
+
+  DynamoDBTableNameOutput:
+    Description: Name of the DynamoDB table for image metadata
+    Value: !Ref SnapperDynamoDBTable
