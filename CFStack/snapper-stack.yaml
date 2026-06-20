@@ -10,14 +10,20 @@ Parameters:
     Type: String
     Default: Data_image
 
+  GitHubRepo:
+    Type: String
+    Default: https://github.com/vkay21/media-sharing-app.git
+
 Resources:
   SnapperMediaBucket:
     Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
     Properties:
       BucketName: !Ref BucketName
 
   SnapperDynamoDBTable:
     Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
     Properties:
       TableName: !Ref TableName
       BillingMode: PAY_PER_REQUEST
@@ -28,11 +34,67 @@ Resources:
         - AttributeName: image_id
           KeyType: HASH
 
+  SnapperSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow HTTP and SSH access to Snapper EC2 server
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+
+        - IpProtocol: tcp
+          FromPort: 5000
+          ToPort: 5000
+          CidrIp: 0.0.0.0/0
+
+  SnapperEC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t2.micro
+      IamInstanceProfile: LabInstanceProfile
+      SecurityGroups:
+        - !Ref SnapperSecurityGroup
+      ImageId: ami-0c02fb55956c7d316
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          yum update -y
+          yum install -y python3 python3-pip git
+
+          cd /home/ec2-user
+          git clone ${GitHubRepo} snapper
+          cd snapper
+
+          cat > .env <<EOF
+          S3_BUCKET_NAME=${BucketName}
+          DYNAMODB_TABLE_NAME=${TableName}
+          AWS_REGION=${AWS::Region}
+          EOF
+
+          pip3 install -r requirements.txt
+
+          nohup python3 -m flask --app app run --host=0.0.0.0 --port=80 > snapper.log 2>&1 &
+
 Outputs:
   BucketNameOutput:
-    Description: Name of the S3 bucket for images and thumbnails
+    Description: S3 bucket for Snapper media files
     Value: !Ref SnapperMediaBucket
 
   DynamoDBTableNameOutput:
-    Description: Name of the DynamoDB table for image metadata
+    Description: DynamoDB table for Snapper metadata
     Value: !Ref SnapperDynamoDBTable
+
+  EC2PublicIP:
+    Description: Public IP address of the Snapper EC2 instance
+    Value: !GetAtt SnapperEC2Instance.PublicIp
+
+  SnapperURL:
+    Description: Snapper web application URL
+    Value: !Sub http://${SnapperEC2Instance.PublicIp}
