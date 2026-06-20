@@ -74,14 +74,20 @@ def upload():
             local_image_path,
             BUCKET_NAME,
             image_key,
-            ExtraArgs={"ContentType": file.content_type}
+            ExtraArgs={
+                "ContentType": file.content_type,
+                "ACL": "public-read"
+            }
         )
 
         s3.upload_file(
             local_thumbnail_path,
             BUCKET_NAME,
             thumbnail_key,
-            ExtraArgs={"ContentType": file.content_type}
+            ExtraArgs={
+                "ContentType": file.content_type,
+                "ACL": "public-read"
+            }
         )
 
         image_url = f"https://{BUCKET_NAME}.s3.{AWS_REGION}.amazonaws.com/{image_key}"
