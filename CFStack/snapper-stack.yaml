@@ -1,100 +1,234 @@
-AWSTemplateFormatVersion: "2010-09-09"
-Description: CloudFormation stack for Snapper media sharing application
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Snapper media-sharing app infrastructure with VPC, IGW, EC2, S3, and DynamoDB
 
 Parameters:
-  BucketName:
-    Type: String
-    Default: snap-media-bucket-7944
+  AmazonLinuxAMIID:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2
 
-  TableName:
+  SSHLocation:
     Type: String
-    Default: Data_image
-
-  GitHubRepo:
-    Type: String
-    Default: https://github.com/vkay21/media-sharing-app.git
+    Default: 0.0.0.0/0
+    Description: IP range allowed to SSH. For lab only.
 
 Resources:
-  SnapperMediaBucket:
-    Type: AWS::S3::Bucket
-    DeletionPolicy: Retain
+  SnapperVPC:
+    Type: AWS::EC2::VPC
     Properties:
-      BucketName: !Ref BucketName
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: Snapper VPC
 
-  SnapperDynamoDBTable:
-    Type: AWS::DynamoDB::Table
-    DeletionPolicy: Retain
+  SnapperInternetGateway:
+    Type: AWS::EC2::InternetGateway
     Properties:
-      TableName: !Ref TableName
-      BillingMode: PAY_PER_REQUEST
-      AttributeDefinitions:
-        - AttributeName: image_id
-          AttributeType: S
-      KeySchema:
-        - AttributeName: image_id
-          KeyType: HASH
+      Tags:
+        - Key: Name
+          Value: Snapper IGW
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref SnapperVPC
+      InternetGatewayId: !Ref SnapperInternetGateway
+
+  SnapperPublicSubnet:
+    Type: AWS::EC2::Subnet
+    DependsOn: AttachGateway
+    Properties:
+      VpcId: !Ref SnapperVPC
+      CidrBlock: 10.0.1.0/24
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: Snapper Public Subnet
+
+  SnapperRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref SnapperVPC
+      Tags:
+        - Key: Name
+          Value: Snapper Public Route Table
+
+  SnapperPublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref SnapperRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref SnapperInternetGateway
+
+  SnapperSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SnapperPublicSubnet
+      RouteTableId: !Ref SnapperRouteTable
 
   SnapperSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: Allow HTTP and SSH access to Snapper EC2 server
+      GroupDescription: Allow SSH and Snapper app traffic
+      VpcId: !Ref SnapperVPC
       SecurityGroupIngress:
-        - IpProtocol: tcp
-          FromPort: 80
-          ToPort: 80
-          CidrIp: 0.0.0.0/0
-
-        - IpProtocol: tcp
-          FromPort: 22
-          ToPort: 22
-          CidrIp: 0.0.0.0/0
-
-        - IpProtocol: tcp
+        - Description: Allow Snapper app on port 5000
+          IpProtocol: tcp
           FromPort: 5000
           ToPort: 5000
           CidrIp: 0.0.0.0/0
 
-  SnapperEC2Instance:
-    Type: AWS::EC2::Instance
+        - Description: Allow SSH
+          IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref SSHLocation
+      Tags:
+        - Key: Name
+          Value: Snapper Security Group
+
+  SnapperBucket:
+    Type: AWS::S3::Bucket
     Properties:
-      InstanceType: t2.micro
+      BucketName: !Sub snapper-media-${AWS::AccountId}-${AWS::Region}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+      Tags:
+        - Key: Name
+          Value: Snapper Media Bucket
+
+  SnapperBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref SnapperBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: PublicReadForMediaFiles
+            Effect: Allow
+            Principal: '*'
+            Action: s3:GetObject
+            Resource: !Sub '${SnapperBucket.Arn}/*'
+
+  SnapperDynamoDBTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: SnapperPosts
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: post_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: post_id
+          KeyType: HASH
+      Tags:
+        - Key: Name
+          Value: Snapper Posts Table
+
+  SnapperInstance:
+    Type: AWS::EC2::Instance
+    DependsOn:
+      - SnapperSubnetRouteTableAssociation
+      - SnapperBucketPolicy
+      - SnapperDynamoDBTable
+    Properties:
       IamInstanceProfile: LabInstanceProfile
-      SecurityGroups:
-        - !Ref SnapperSecurityGroup
-      ImageId: ami-0c02fb55956c7d316
+      ImageId: !Ref AmazonLinuxAMIID
+      InstanceType: t3.micro
+      NetworkInterfaces:
+        - DeviceIndex: 0
+          AssociatePublicIpAddress: true
+          SubnetId: !Ref SnapperPublicSubnet
+          GroupSet:
+            - !Ref SnapperSecurityGroup
+      Tags:
+        - Key: Name
+          Value: Snapper Web Server
       UserData:
         Fn::Base64: !Sub |
-          #!/bin/bash
-          yum update -y
-          yum install -y python3 python3-pip git
+          #!/bin/bash -xe
 
-          cd /home/ec2-user
-          git clone ${GitHubRepo} snapper
-          cd snapper
+          exec > /var/log/user-data.log 2>&1
 
-          cat > .env <<EOF
-          S3_BUCKET_NAME=${BucketName}
-          DYNAMODB_TABLE_NAME=${TableName}
-          AWS_REGION=${AWS::Region}
+          yum -y update
+          yum -y install python3 python3-pip git
+
+          mkdir -p /home/ec2-user/snapper
+          chown -R ec2-user:ec2-user /home/ec2-user/snapper
+
+          cd /home/ec2-user/snapper
+
+          # Replace this with your actual app source if needed
+          # Example:
+          # git clone https://github.com/YOUR_USERNAME/snapper.git .
+          
+          cat > app.py <<EOF
+          from flask import Flask
+          app = Flask(__name__)
+
+          @app.route("/")
+          def home():
+              return "Snapper app is running on port 5000!"
+
+          if __name__ == "__main__":
+              app.run(host="0.0.0.0", port=5000)
+          EOF
+
+          cat > requirements.txt <<EOF
+          flask
+          boto3
           EOF
 
           pip3 install -r requirements.txt
 
-          nohup python3 -m flask --app app run --host=0.0.0.0 --port=80 > snapper.log 2>&1 &
+          cat > /etc/systemd/system/snapper.service <<EOF
+          [Unit]
+          Description=Snapper Media Sharing App
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=simple
+          WorkingDirectory=/home/ec2-user/snapper
+          Environment=AWS_REGION=${AWS::Region}
+          Environment=S3_BUCKET=${SnapperBucket}
+          Environment=DYNAMODB_TABLE=${SnapperDynamoDBTable}
+          ExecStart=/usr/bin/python3 app.py
+          Restart=always
+          RestartSec=10
+          User=ec2-user
+
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+
+          systemctl daemon-reload
+          systemctl enable snapper
+          systemctl start snapper
 
 Outputs:
-  BucketNameOutput:
-    Description: S3 bucket for Snapper media files
-    Value: !Ref SnapperMediaBucket
+  SnapperURL:
+    Description: Snapper application URL
+    Value: !Sub "http://${SnapperInstance.PublicDnsName}:5000"
 
-  DynamoDBTableNameOutput:
-    Description: DynamoDB table for Snapper metadata
+  SnapperPublicDNS:
+    Description: Public DNS of Snapper EC2 instance
+    Value: !GetAtt SnapperInstance.PublicDnsName
+
+  SnapperBucketName:
+    Description: S3 bucket for Snapper media uploads
+    Value: !Ref SnapperBucket
+
+  SnapperDynamoDBTableName:
+    Description: DynamoDB table for Snapper posts
     Value: !Ref SnapperDynamoDBTable
 
-  EC2PublicIP:
-    Description: Public IP address of the Snapper EC2 instance
-    Value: !GetAtt SnapperEC2Instance.PublicIp
-
-  SnapperURL:
-    Description: Snapper web application URL
-    Value: !Sub http://${SnapperEC2Instance.PublicIp}
+  SnapperVPCId:
+    Description: Snapper VPC ID
+    Value: !Ref SnapperVPC
