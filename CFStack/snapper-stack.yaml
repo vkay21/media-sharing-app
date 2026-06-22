@@ -1,15 +1,18 @@
-AWSTemplateFormatVersion: '2010-09-09'
-Description: Snapper media-sharing app with VPC, Internet Gateway, EC2, S3, and DynamoDB
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Snapper media sharing application using EC2, S3, DynamoDB, and CloudFormation
 
 Parameters:
-  AmazonLinuxAMIID:
-    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
-    Default: /aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2
-
-  SSHLocation:
+  BucketName:
     Type: String
-    Default: 0.0.0.0/0
-    Description: IP range allowed to SSH. Lab use only.
+    Default: snap-media-bucket-7944
+
+  TableName:
+    Type: String
+    Default: Data_image
+
+  GitHubRepo:
+    Type: String
+    Default: https://github.com/vkay21/media-sharing-app.git
 
 Resources:
   SnapperVPC:
@@ -20,14 +23,10 @@ Resources:
       EnableDnsHostnames: true
       Tags:
         - Key: Name
-          Value: Snapper VPC
+          Value: SnapperVPC
 
   SnapperInternetGateway:
     Type: AWS::EC2::InternetGateway
-    Properties:
-      Tags:
-        - Key: Name
-          Value: Snapper IGW
 
   SnapperGatewayAttachment:
     Type: AWS::EC2::VPCGatewayAttachment
@@ -37,23 +36,19 @@ Resources:
 
   SnapperPublicSubnet:
     Type: AWS::EC2::Subnet
-    DependsOn: SnapperGatewayAttachment
     Properties:
       VpcId: !Ref SnapperVPC
       CidrBlock: 10.0.1.0/24
       MapPublicIpOnLaunch: true
-      AvailabilityZone: !Select [0, !GetAZs '']
+      AvailabilityZone: !Select [0, !GetAZs ""]
       Tags:
         - Key: Name
-          Value: Snapper Public Subnet
+          Value: SnapperPublicSubnet
 
   SnapperRouteTable:
     Type: AWS::EC2::RouteTable
     Properties:
       VpcId: !Ref SnapperVPC
-      Tags:
-        - Key: Name
-          Value: Snapper Public Route Table
 
   SnapperPublicRoute:
     Type: AWS::EC2::Route
@@ -72,297 +67,105 @@ Resources:
   SnapperSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: Allow SSH and Snapper app traffic on port 5000
+      GroupDescription: Allow Snapper web and SSH access
       VpcId: !Ref SnapperVPC
       SecurityGroupIngress:
-        - Description: Allow Snapper web app
-          IpProtocol: tcp
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+
+        - IpProtocol: tcp
           FromPort: 5000
           ToPort: 5000
           CidrIp: 0.0.0.0/0
 
-        - Description: Allow SSH
-          IpProtocol: tcp
-          FromPort: 22
-          ToPort: 22
-          CidrIp: !Ref SSHLocation
-      Tags:
-        - Key: Name
-          Value: Snapper Security Group
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
 
   SnapperBucket:
     Type: AWS::S3::Bucket
     Properties:
-      BucketName: !Sub snapper-media-bucket-7944
+      BucketName: !Ref BucketName
       PublicAccessBlockConfiguration:
         BlockPublicAcls: false
         BlockPublicPolicy: false
         IgnorePublicAcls: false
         RestrictPublicBuckets: false
-      Tags:
-        - Key: Name
-          Value: Snapper Media Bucket
 
   SnapperBucketPolicy:
     Type: AWS::S3::BucketPolicy
     Properties:
       Bucket: !Ref SnapperBucket
       PolicyDocument:
-        Version: '2012-10-17'
+        Version: "2012-10-17"
         Statement:
-          - Sid: PublicReadForMediaFiles
+          - Sid: PublicReadForSnapperImages
             Effect: Allow
-            Principal: '*'
+            Principal: "*"
             Action: s3:GetObject
-            Resource: !Sub '${SnapperBucket.Arn}/*'
+            Resource: !Sub arn:aws:s3:::${BucketName}/*
 
   SnapperDynamoDBTable:
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: Snapperposts
+      TableName: !Ref TableName
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
-        - AttributeName: post_id
+        - AttributeName: image_id
           AttributeType: S
       KeySchema:
-        - AttributeName: post_id
+        - AttributeName: image_id
           KeyType: HASH
-      Tags:
-        - Key: Name
-          Value: Snapper Posts Table
 
-  SnapperInstance:
+  SnapperEC2Instance:
     Type: AWS::EC2::Instance
-    DependsOn:
-      - SnapperSubnetRouteTableAssociation
-      - SnapperBucketPolicy
-      - SnapperDynamoDBTable
     Properties:
+      InstanceType: t2.micro
+      ImageId: ami-0c02fb55956c7d316
+      SubnetId: !Ref SnapperPublicSubnet
+      SecurityGroupIds:
+        - !Ref SnapperSecurityGroup
       IamInstanceProfile: LabInstanceProfile
-      ImageId: !Ref AmazonLinuxAMIID
-      InstanceType: t3.micro
-      NetworkInterfaces:
-        - DeviceIndex: 0
-          AssociatePublicIpAddress: true
-          SubnetId: !Ref SnapperPublicSubnet
-          GroupSet:
-            - !Ref SnapperSecurityGroup
       Tags:
         - Key: Name
-          Value: Snapper Web Server
+          Value: SnapperEC2
       UserData:
         Fn::Base64: !Sub |
           #!/bin/bash -xe
-
           exec > /var/log/user-data.log 2>&1
 
           yum -y update
-          yum -y install python3 python3-pip
+          yum -y install git python3 python3-pip
 
-          mkdir -p /home/ec2-user/snapper
-          cd /home/ec2-user/snapper
+          cd /home/ec2-user
+          rm -rf snapper
+          git clone ${GitHubRepo} snapper
+          cd snapper
 
-          cat > app.py <<'EOF'
-          from flask import Flask, request, redirect, url_for
-          import boto3
-          import uuid
-          import os
-
-          app = Flask(__name__)
-
-          AWS_REGION = os.environ.get("AWS_REGION")
-          S3_BUCKET = os.environ.get("S3_BUCKET")
-          DYNAMODB_TABLE = os.environ.get("DYNAMODB_TABLE")
-
-          s3 = boto3.client("s3", region_name=AWS_REGION)
-          dynamodb = boto3.resource("dynamodb", region_name=AWS_REGION)
-          table = dynamodb.Table(DYNAMODB_TABLE)
-
-          @app.route("/", methods=["GET"])
-          def home():
-              html = f"""
-              <!DOCTYPE html>
-              <html>
-              <head>
-                  <title>Snapper</title>
-                  <style>
-                      body {{
-                          font-family: Arial, sans-serif;
-                          background: #f5f7fb;
-                          padding: 40px;
-                      }}
-                      .container {{
-                          max-width: 800px;
-                          margin: auto;
-                          background: white;
-                          padding: 30px;
-                          border-radius: 12px;
-                          box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-                      }}
-                      h1 {{
-                          color: #222;
-                      }}
-                      .badge {{
-                          background: #e8f0ff;
-                          padding: 8px 12px;
-                          border-radius: 8px;
-                          display: inline-block;
-                          margin-bottom: 20px;
-                      }}
-                      input, button {{
-                          padding: 10px;
-                          margin-top: 10px;
-                      }}
-                      button {{
-                          background: #222;
-                          color: white;
-                          border: none;
-                          border-radius: 6px;
-                          cursor: pointer;
-                      }}
-                      img {{
-                          max-width: 250px;
-                          margin-top: 20px;
-                          border-radius: 10px;
-                      }}
-                  </style>
-              </head>
-              <body>
-                  <div class="container">
-                      <div class="badge">Running on AWS EC2 port 5000</div>
-                      <h1>Welcome to Snapper</h1>
-                      <p>A simple media-sharing app deployed with CloudFormation.</p>
-
-                      <h3>AWS Resources Connected</h3>
-                      <ul>
-                          <li>EC2 web server</li>
-                          <li>S3 bucket: {S3_BUCKET}</li>
-                          <li>DynamoDB table: {DYNAMODB_TABLE}</li>
-                          <li>Custom VPC with Internet Gateway</li>
-                      </ul>
-
-                      <h3>Upload a Photo</h3>
-                      <form action="/upload" method="POST" enctype="multipart/form-data">
-                          <input type="file" name="photo" required>
-                          <br>
-                          <button type="submit">Upload to S3</button>
-                      </form>
-
-                      <p><a href="/posts">View Uploaded Posts</a></p>
-                  </div>
-              </body>
-              </html>
-              """
-              return html
-
-          @app.route("/upload", methods=["POST"])
-          def upload():
-              if "photo" not in request.files:
-                  return "No file uploaded", 400
-
-              file = request.files["photo"]
-
-              if file.filename == "":
-                  return "No selected file", 400
-
-              post_id = str(uuid.uuid4())
-              filename = post_id + "-" + file.filename
-
-              s3.upload_fileobj(
-                  file,
-                  S3_BUCKET,
-                  filename,
-                  ExtraArgs={"ContentType": file.content_type}
-              )
-
-              image_url = f"https://{S3_BUCKET}.s3.amazonaws.com/{filename}"
-
-              table.put_item(
-                  Item={
-                      "post_id": post_id,
-                      "filename": filename,
-                      "image_url": image_url
-                  }
-              )
-
-              return redirect(url_for("posts"))
-
-          @app.route("/posts", methods=["GET"])
-          def posts():
-              response = table.scan()
-              items = response.get("Items", [])
-
-              image_cards = ""
-
-              for item in items:
-                  image_cards += f"""
-                  <div style="margin-bottom:30px;">
-                      <img src="{item['image_url']}">
-                      <p>{item['filename']}</p>
-                  </div>
-                  """
-
-              return f"""
-              <!DOCTYPE html>
-              <html>
-              <head>
-                  <title>Snapper Posts</title>
-                  <style>
-                      body {{
-                          font-family: Arial, sans-serif;
-                          background: #f5f7fb;
-                          padding: 40px;
-                      }}
-                      .container {{
-                          max-width: 800px;
-                          margin: auto;
-                          background: white;
-                          padding: 30px;
-                          border-radius: 12px;
-                          box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-                      }}
-                      img {{
-                          max-width: 300px;
-                          border-radius: 10px;
-                      }}
-                  </style>
-              </head>
-              <body>
-                  <div class="container">
-                      <h1>Snapper Uploaded Posts</h1>
-                      <p><a href="/">Upload another photo</a></p>
-                      {image_cards if image_cards else "<p>No posts yet.</p>"}
-                  </div>
-              </body>
-              </html>
-              """
-
-          if __name__ == "__main__":
-              app.run(host="0.0.0.0", port=5000)
+          cat > .env <<EOF
+          S3_BUCKET_NAME=${BucketName}
+          DYNAMODB_TABLE_NAME=${TableName}
+          AWS_REGION=${AWS::Region}
           EOF
 
-          cat > requirements.txt <<'EOF'
-          flask
-          boto3
-          EOF
-
-          pip3 install -r requirements.txt
+          pip3 install --upgrade pip
+          pip3 install Flask boto3 Pillow python-dotenv
 
           chown -R ec2-user:ec2-user /home/ec2-user/snapper
 
           cat > /etc/systemd/system/snapper.service <<EOF
           [Unit]
-          Description=Snapper Media Sharing App
+          Description=Snapper Media Sharing Flask App
           After=network-online.target
           Wants=network-online.target
 
           [Service]
           Type=simple
           WorkingDirectory=/home/ec2-user/snapper
-          Environment=AWS_REGION=${AWS::Region}
-          Environment=S3_BUCKET=${SnapperBucket}
-          Environment=DYNAMODB_TABLE=${SnapperDynamoDBTable}
-          ExecStart=/usr/bin/python3 app.py
+          EnvironmentFile=/home/ec2-user/snapper/.env
+          ExecStart=/usr/bin/python3 /home/ec2-user/snapper/app.py
           Restart=always
           RestartSec=10
           User=ec2-user
@@ -377,21 +180,17 @@ Resources:
 
 Outputs:
   SnapperURL:
-    Description: Open this URL to view Snapper
-    Value: !Sub "http://${SnapperInstance.PublicDnsName}:5000"
+    Description: Snapper application URL
+    Value: !Sub http://${SnapperEC2Instance.PublicIp}:5000
 
-  SnapperPublicDNS:
-    Description: Public DNS of the EC2 instance
-    Value: !GetAtt SnapperInstance.PublicDnsName
+  EC2PublicIP:
+    Description: Public IP address of Snapper EC2 instance
+    Value: !GetAtt SnapperEC2Instance.PublicIp
 
-  SnapperBucketName:
-    Description: S3 bucket name
+  BucketNameOutput:
+    Description: S3 bucket for images and thumbnails
     Value: !Ref SnapperBucket
 
-  SnapperDynamoDBTableName:
-    Description: DynamoDB table name
+  DynamoDBTableNameOutput:
+    Description: DynamoDB table for image metadata
     Value: !Ref SnapperDynamoDBTable
-
-  SnapperVPCId:
-    Description: VPC ID
-    Value: !Ref SnapperVPC
